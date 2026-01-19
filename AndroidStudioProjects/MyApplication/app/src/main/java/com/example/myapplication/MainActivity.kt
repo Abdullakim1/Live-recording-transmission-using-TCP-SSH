@@ -8,13 +8,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,77 +17,83 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import java.net.ServerSocket
+import java.io.OutputStream
+import java.net.Socket
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MicrophoneScreen()
+            AutoStreamScreen()
         }
     }
 }
 
 @Composable
-fun MicrophoneScreen() {
+fun AutoStreamScreen() {
     val context = LocalContext.current
-    var statusText by remember { mutableStateOf("Initializing Auto-Start...") }
+
+
+
+    val SERVER_HOST = "bumwl-192-167-110-25.a.free.pinggy.link" // Change this to your ngrok URL
+    val SERVER_PORT = 36683            // Change this to your ngrok Port
+
+    var statusText by remember { mutableStateOf("Initializing...") }
     var isStreaming by remember { mutableStateOf(false) }
 
-    fun startStreaming() {
-        // Prevent duplicate threads if already running
+    fun startAutoConnection() {
         if (isStreaming) return
 
         Thread {
             try {
-                // 1. Open a "Door" (Server) on Port 5000
-                // We wrap this in try/catch specifically for "Address already in use" errors
-                val serverSocket = try {
-                    ServerSocket(5000)
-                } catch (e: Exception) {
-                    // If port is busy, it usually means the previous socket didn't close fast enough
-                    // or the app rotated. We simply return to avoid crash.
+                // 1. Permission Check
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED) {
+                    statusText = "Missing Microphone Permission"
                     return@Thread
                 }
 
-                // Update UI: Waiting for laptop...
-                statusText = "Waiting for Laptop to connect..."
+                statusText = "Connecting to $SERVER_HOST:$SERVER_PORT..."
 
-                // 2. Wait here until Laptop connects
-                val clientSocket = serverSocket.accept()
+                // 2. Connect via TCP
+                // This blocks until connected or fails
+                val socket = Socket(SERVER_HOST, SERVER_PORT)
 
-                statusText = "🔴 LIVE! Streaming to Laptop..."
+                statusText = "🔴 LIVE! Transmitting to Laptop..."
                 isStreaming = true
 
-                val outputStream = clientSocket.getOutputStream()
+                val outputStream: OutputStream = socket.getOutputStream()
+
+                // Audio Configuration (Must match the 'aplay' command on laptop)
+                val sampleRate = 44100
+                val channelConfig = android.media.AudioFormat.CHANNEL_IN_MONO
+                val audioFormat = android.media.AudioFormat.ENCODING_PCM_16BIT
+
                 val minBufferSize = android.media.AudioRecord.getMinBufferSize(
-                    44100,
-                    android.media.AudioFormat.CHANNEL_IN_MONO,
-                    android.media.AudioFormat.ENCODING_PCM_16BIT
+                    sampleRate, channelConfig, audioFormat
                 )
 
-                // 3. Setup Microphone
                 val recorder = android.media.AudioRecord(
                     android.media.MediaRecorder.AudioSource.MIC,
-                    44100,
-                    android.media.AudioFormat.CHANNEL_IN_MONO,
-                    android.media.AudioFormat.ENCODING_PCM_16BIT,
+                    sampleRate,
+                    channelConfig,
+                    audioFormat,
                     minBufferSize
                 )
 
                 recorder.startRecording()
                 val buffer = ByteArray(minBufferSize)
 
-                // 4. THE LOOP: Read Mic -> Send to Laptop
                 while (isStreaming) {
                     val read = recorder.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         try {
                             outputStream.write(buffer, 0, read)
+                            outputStream.flush()
                         } catch (e: Exception) {
-                            // If laptop disconnects, stop the loop
                             isStreaming = false
+                            statusText = "Connection Lost: ${e.message}"
                         }
                     }
                 }
@@ -100,63 +101,59 @@ fun MicrophoneScreen() {
                 // Cleanup
                 recorder.stop()
                 recorder.release()
-                clientSocket.close()
-                serverSocket.close()
-                statusText = "Ready to connect again"
+                socket.close()
 
             } catch (e: Exception) {
                 e.printStackTrace()
-                statusText = "Error: ${e.message}"
+                statusText = "Connection Failed (${e.message})\nCheck Ngrok address?"
                 isStreaming = false
             }
         }.start()
     }
 
-    // Permission Launcher
+    // Permissions Logic (Only Audio needed now)
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { isGranted ->
-            if (isGranted) startStreaming()
-            else statusText = "Permission Denied. Cannot Stream."
+            if (isGranted) startAutoConnection()
+            else statusText = "Mic Permission Denied."
         }
     )
 
-    // --- AUTOMATIC START LOGIC ---
-    // LaunchedEffect runs exactly once when the app screen loads
+    // AUTOMATIC START TRIGGER
     LaunchedEffect(Unit) {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) {
-            startStreaming()
+        val hasPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPerm) {
+            startAutoConnection()
         } else {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
-    // UI
     Column(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
+        modifier = Modifier.fillMaxSize().padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
-        Text(text = statusText, textAlign = TextAlign.Center)
-        Spacer(modifier = Modifier.height(20.dp))
+        Text(
+            text = statusText,
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.headlineSmall
+        )
+        Spacer(modifier = Modifier.height(30.dp))
 
-        // We keep the button just in case you want to stop it manually
-        Button(onClick = {
-            if (isStreaming) {
-                isStreaming = false
-                statusText = "Stopping..."
-            } else {
-                // If the user manually restarts
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-                    == PackageManager.PERMISSION_GRANTED) {
-                    startStreaming()
-                } else {
-                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }
+        if (!isStreaming) {
+            Button(onClick = { startAutoConnection() }) {
+                Text("Retry Connection")
             }
-        }) {
-            Text(if (isStreaming) "Stop Stream" else "Restart Stream")
+        } else {
+            Button(onClick = { isStreaming = false; statusText = "Stopped" }) {
+                Text("Stop Stream")
+            }
         }
     }
 }
